@@ -35,7 +35,7 @@ st.markdown(
 pages = {
     "Relatorios":[
         st.Page(relatorioHoras.exibir, title="Relatório de Horas"),
-        st.Page(roi.run, title="ROI")
+        st.Page(roi.exibirROI, title="ROI")
     ]
 }
 pg = st.navigation(pages, position="top")

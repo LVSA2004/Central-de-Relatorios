@@ -3,6 +3,7 @@ import streamlit as st
 import plotly.express as px
 import datetime as dt
 from planilhaLoader import *
+import plotly.graph_objects as go
 
 BASE_DIR = get_base_dir()
 FILE_PATH = get_excel_path()
@@ -14,6 +15,9 @@ MONTH_MAP = {
     "maio": 5, "junho": 6, "julho": 7, "agosto": 8,
     "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12
 }
+
+DOW_ORDER = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
+DOW_MAP = {0: "Seg", 1: "Ter", 2: "Qua", 3: "Qui", 4: "Sex", 5: "Sáb", 6: "Dom"}
 
 
 def get_month_number(sheet_name: str) -> int | None:
@@ -50,165 +54,138 @@ def relatorio():
     return df, sheet_selected
 
 
-def graficoBarras(df):
+def mapa_dia_mes_08_17(df: pd.DataFrame, titulo="Mapa de horas (08:00–17:00)"):
     if df is None or df.empty:
-        st.info("Sem dados para gerar gráficos.")
+        st.info("Sem dados para gerar o mapa.")
         return
 
-    df_plot = df[
-        df["Dia"].astype(str).str.strip().str.lower() != "soma"
-    ].copy()
-
+    # ✅ ignora "Soma"
+    df_plot = df[df["Dia"].astype(str).str.strip().str.lower() != "soma"].copy()
     if df_plot.empty:
-        st.warning("Dados insuficientes para análise (apenas linha de soma).")
+        st.warning("Sem dados (apenas linha de soma).")
         return
 
-    # Conversões para análise
-    df_plot["Monit_min"] = df_plot["Total - Monitoramento"].map(hhmmss_to_minutes)
-    df_plot["Dev_min"] = df_plot["Total - Desenvolvimento"].map(hhmmss_to_minutes)
+    # mantém só o que interessa e ordena por dia (tenta ordenar pelo número no começo)
+    df_plot["DiaLabel"] = df_plot["Dia"].astype(str).str.strip()
 
-    df_long = df_plot.melt(
-        id_vars=["Dia"],
-        value_vars=["Monit_min", "Dev_min"],
-        var_name="Tipo",
-        value_name="Minutos"
+    # tenta extrair número do dia (serve pra "01/12" e "1")
+    df_plot["DiaNum"] = pd.to_numeric(df_plot["DiaLabel"].str.extract(r"(\d+)")[0], errors="coerce")
+    df_plot = df_plot.sort_values(["DiaNum", "DiaLabel"], na_position="last")
+
+    # converte tempos para horas
+    df_plot["Monit_h"] = df_plot["Total - Monitoramento"].map(hhmmss_to_hours)
+    df_plot["Dev_h"]   = df_plot["Total - Desenvolvimento"].map(hhmmss_to_hours)
+
+    # opcional: limitar a janela 08-17 (9h) para caber no eixo
+    # se quiser mostrar tudo, remova o clip (mas aí pode “passar” de 17:00)
+    df_plot["Monit_h"] = df_plot["Monit_h"].clip(lower=0, upper=9)
+    df_plot["Dev_h"]   = df_plot["Dev_h"].clip(lower=0, upper=9)
+
+    start_hour = 8
+    end_hour = 17
+    max_window = end_hour - start_hour  # 9 horas
+
+    # se quiser que a soma não passe de 9h, ajusta proporcionalmente
+    total = df_plot["Monit_h"] + df_plot["Dev_h"]
+    scale = (max_window / total).where(total > max_window, 1.0)
+    df_plot["Monit_h"] = df_plot["Monit_h"] * scale
+    df_plot["Dev_h"]   = df_plot["Dev_h"] * scale
+
+    y = df_plot["DiaLabel"]
+
+    fig = go.Figure()
+
+    # 1) Monitoramento (começa em 08:00)
+    fig.add_trace(go.Bar(
+        y=y,
+        x=df_plot["Monit_h"],
+        base=start_hour,
+        orientation="h",
+        name="Monitoramento",
+        marker=dict(color="#FAA43A"),
+        hovertemplate="Dia: %{y}<br>Monitoramento: %{x:.2f}h<extra></extra>",
+    ))
+
+    # 2) Desenvolvimento 
+    fig.add_trace(go.Bar(
+        y=y,
+        x=df_plot["Dev_h"],
+        base=start_hour + df_plot["Monit_h"],
+        orientation="h",
+        name="Desenvolvimento",
+        marker=dict(color="#5DA5DA"),
+        hovertemplate="Dia: %{y}<br>Desenvolvimento: %{x:.2f}h<extra></extra>",
+    ))
+
+    tickvals = list(range(start_hour, end_hour + 1))
+    ticktext = [f"{h:02d}:00" for h in tickvals]
+
+    fig.update_layout(
+        template="simple_white",
+        title=titulo,
+        barmode="overlay", 
+        xaxis=dict(
+            range=[start_hour, end_hour],
+            tickmode="array",
+            tickvals=tickvals,
+            ticktext=ticktext,
+            side="top",
+            title="",
+        ),
+        yaxis=dict(
+            title="Dia",
+            autorange="reversed"
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        margin=dict(l=60, r=30, t=80, b=30),
+        height=max(420, 22 * len(df_plot))
     )
-
-    df_long["Tipo"] = df_long["Tipo"].map({
-        "Monit_min": "Monitoramento",
-        "Dev_min": "Desenvolvimento"
-    })
-
-    fig = px.bar(
-        df_long,
-        x="Dia",
-        y="Minutos",
-        color="Tipo",
-        title="Minutos por dia — Monitoramento x Desenvolvimento",
-        labels={"Minutos": "Minutos", "Dia": "Dia"},
-    )
-
     st.plotly_chart(fig, use_container_width=True)
     return df_plot
 
 def graficoPizza(df_plot):
-    total_monit = df_plot["Monit_min"].sum()
-    total_dev = df_plot["Dev_min"].sum()
-
+    if df_plot is None or df_plot.empty:
+        st.info("Sem dados para gerar o gráfico de pizza.")
+        return
+    total_monit_h = df_plot["Monit_h"].sum()
+    total_dev_h   = df_plot["Dev_h"].sum()
+    if total_monit_h == 0 and total_dev_h == 0:
+        st.warning("Tempo total zerado — não há dados para exibir.")
+        return
     df_pie = pd.DataFrame({
         "Tipo": ["Monitoramento", "Desenvolvimento"],
-        "Minutos": [total_monit, total_dev]
+        "Horas": [total_monit_h, total_dev_h]
     })
-
-    fig2 = px.pie(
+    fig = px.pie(
         df_pie,
         names="Tipo",
-        values="Minutos",
-        title="Distribuição do tempo total"
+        values="Horas",
+        title="Distribuição do tempo total",
+        hole=0.35,  # donut (mais profissional)
+        color="Tipo",
+        color_discrete_map={
+            "Monitoramento": "#FAA43A",
+            "Desenvolvimento": "#5DA5DA",
+        }
     )
-
-    st.plotly_chart(fig2, use_container_width=True)
-
-def graficoBurnUp(df_plot):
-    df_plot["Total_min"] = df_plot["Total"].map(hhmmss_to_minutes)
-    df_plot = df_plot.sort_values("Dia")
-
-    df_plot["Acumulado"] = df_plot["Total_min"].cumsum()
-
-    fig3 = px.line(
-        df_plot,
-        x="Dia",
-        y="Acumulado",
-        title="Horas acumuladas no mês",
-        labels={"Acumulado": "Minutos acumulados"}
+    fig.update_traces(
+        textinfo="percent+label",
+        marker=dict(line=dict(color="#000000", width=1))
     )
-
-    st.plotly_chart(fig3, use_container_width=True)
-
-def boxplot(df_plot):
-    fig4 = px.box(
-        df_plot,
-        y="Total_min",
-        title="Variabilidade do tempo diário",
-        labels={"Total_min": "Minutos por dia"},
-        points="outliers"
-    )
-    st.plotly_chart(fig4, use_container_width=True)
-
-def heatmap_monitoramento(df: pd.DataFrame,sheet_selected: str,year: int = 2025):
-    if df is None or df.empty:
-        st.info("Sem dados para gerar heatmap.")
-        return
-
-    # 🔹 ignora linha "Soma"
-    df_plot = df[df["Dia"].astype(str).str.strip().str.lower() != "soma"].copy()
-    if df_plot.empty:
-        st.warning("Planilha contém apenas a linha de soma.")
-        return
-
-    # 🔹 resolve o mês pelo nome da worksheet
-    month = MONTH_MAP.get(sheet_selected.strip().lower())
-    if not month:
-        st.error(f"Não foi possível identificar o mês da aba '{sheet_selected}'.")
-        return
-
-    # 🔹 dia do mês
-    df_plot["Dia"] = pd.to_numeric(df_plot["Dia"], errors="coerce")
-    df_plot = df_plot.dropna(subset=["Dia"])
-    df_plot["Dia"] = df_plot["Dia"].astype(int)
-
-    # 🔹 cria data real
-    df_plot["Data"] = df_plot["Dia"].apply(
-        lambda d: dt.date(year, month, d)
-    )
-
-    # 🔹 dia da semana (Seg..Dom)
-    dow_labels = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
-    df_plot["DiaSemana"] = df_plot["Data"].apply(lambda d: dow_labels[d.weekday()])
-
-    # 🔹 semana do mês
-    first_day = dt.date(year, month, 1)
-    df_plot["SemanaMes"] = (
-        (df_plot["Dia"] + first_day.weekday() - 1) // 7
-    ) + 1
-
-    # 🔹 horas de monitoramento
-    df_plot["HorasMonit"] = df_plot["Total - Monitoramento"].map(hhmmss_to_hours)
-
-    # 🔹 pivot para heatmap
-    grid = df_plot.pivot_table(
-        index="SemanaMes",
-        columns="DiaSemana",
-        values="HorasMonit",
-        aggfunc="sum"
-    ).reindex(columns=dow_labels)
-
-    # 🔹 plot
-    fig = px.imshow(
-        grid,
-        aspect="auto",
-        title=f"Heatmap de Monitoramento — {sheet_selected}",
-        labels=dict(
-            x="Dia da semana",
-            y="Semana do mês",
-            color="Horas"
-        ),
-        color_continuous_scale="YlOrRd"
-    )
-
     fig.update_layout(
-        margin=dict(l=10, r=10, t=60, b=10),
-        yaxis=dict(tickmode="linear")
+        template="simple_white",
+        showlegend=True
     )
-
     st.plotly_chart(fig, use_container_width=True)
-
 
 
 def exibir():
     df, sheet_selected = relatorio()
-    df_plot = graficoBarras(df)
+    df_plot = mapa_dia_mes_08_17(df, sheet_selected)
     graficoPizza(df_plot)
-    graficoBurnUp(df_plot)
-    boxplot(df_plot)
-    heatmap_monitoramento(df, sheet_selected)
